@@ -14,7 +14,32 @@ if [ "$1" == "-l" ] ; then
 fi
 
 mount -t tmpfs tmpfs /dev   -o size=8K
-mount -t tmpfs tmpfs /etc   -o size=$size_etc,noatime
+
+# Try to mount /etc on eMMC, fallback to tmpfs
+emmc_etc_dev="/dev/mmcblk0p1"
+emmc_mounted=0
+
+if [ -b "$emmc_etc_dev" ]; then
+    # Try to mount
+    mount -t ext4 "$emmc_etc_dev" /etc -o noatime 2>/dev/null
+    
+    # If mount failed, try to format
+    if [ $? -ne 0 ]; then
+        logger -t "dev_init" "Mount failed, formatting $emmc_etc_dev to ext4..."
+        mkfs.ext4 -F "$emmc_etc_dev"
+        mount -t ext4 "$emmc_etc_dev" /etc -o noatime 2>/dev/null
+    fi
+    
+    if [ $? -eq 0 ]; then
+        emmc_mounted=1
+        logger -t "dev_init" "Mounted /etc on eMMC: $emmc_etc_dev"
+    fi
+fi
+
+if [ "$emmc_mounted" -eq 0 ]; then
+    mount -t tmpfs tmpfs /etc -o size=$size_etc,noatime
+    logger -t "dev_init" "Using tmpfs for /etc (eMMC not available)"
+fi
 mount -t tmpfs tmpfs /home  -o size=1M
 mount -t tmpfs tmpfs /media -o size=8K
 mount -t tmpfs tmpfs /mnt   -o size=8K

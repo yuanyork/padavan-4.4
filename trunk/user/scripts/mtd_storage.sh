@@ -46,6 +46,13 @@ func_load()
 {
 	local fsz
 
+	# Check if /etc is on eMMC (not tmpfs)
+	if ! mount | grep "on /etc type tmpfs" >/dev/null; then
+		logger -t "Storage" "/etc is on persistent storage (eMMC). Skipping load from MTD."
+		rm -f $slk
+		return 0
+	fi
+
 	bzcat $mtd_part_dev > $tmp 2>/dev/null
 	fsz=`stat -c %s $tmp 2>/dev/null`
 	if [ -n "$fsz" ] && [ $fsz -gt 0 ] ; then
@@ -76,6 +83,13 @@ func_tarb()
 func_save()
 {
 	local fsz
+
+	# Check if /etc is on eMMC (not tmpfs)
+	if ! mount | grep "on /etc type tmpfs" >/dev/null; then
+		logger -t "Storage" "/etc is on persistent storage (eMMC). Syncing filesystem."
+		sync
+		return 0
+	fi
 
 	logger -t "Storage save" "Save storage files to MTD partition \"$mtd_part_dev\""
 	echo "Save storage files to MTD partition \"$mtd_part_dev\""
