@@ -9,6 +9,7 @@ slk="/tmp/.storage_locked"
 tmp="/tmp/storage.tar"
 tbz="${tmp}.bz2"
 hsh="/tmp/hashes/storage_md5"
+emmc_storage_file="/media/storage_emmc/storage.tar.bz2"
 
 func_get_mtd()
 {
@@ -44,26 +45,44 @@ func_start_apps()
 
 func_load()
 {
-	local fsz
+	local fsz mtd_load=1
 
-	# Check if /etc is on eMMC (not tmpfs)
-	if ! mount | grep "on /etc type tmpfs" >/dev/null; then
-		logger -t "Storage" "/etc is on persistent storage (eMMC). Skipping load from MTD."
-		rm -f $slk
-		return 0
+	if [ -f "$emmc_storage_file" ]; then
+		logger -t "Storage load" "Loading from eMMC backing store: $emmc_storage_file"
+		bzcat "$emmc_storage_file" > $tmp 2>/dev/null
+		fsz=`stat -c %s $tmp 2>/dev/null`
+		if [ -n "$fsz" ] && [ $fsz -gt 0 ] ; then
+			tar xf $tmp -C $dir_storage 2>/dev/null
+			if [ $? -eq 0 ]; then
+				mtd_load=0
+				md5sum $tmp > $hsh
+			fi
+		fi
+		rm -f $tmp
 	fi
 
-	bzcat $mtd_part_dev > $tmp 2>/dev/null
-	fsz=`stat -c %s $tmp 2>/dev/null`
-	if [ -n "$fsz" ] && [ $fsz -gt 0 ] ; then
-		md5sum $tmp > $hsh
-		tar xf $tmp -C $dir_storage 2>/dev/null
-	else
-		result=1
-		rm -f $hsh
-		logger -t "Storage load" "Invalid storage data in MTD partition: $mtd_part_dev"
+	if [ $mtd_load -eq 1 ]; then
+		logger -t "Storage load" "Loading from MTD partition: $mtd_part_dev"
+		bzcat $mtd_part_dev > $tmp 2>/dev/null
+		fsz=`stat -c %s $tmp 2>/dev/null`
+		if [ -n "$fsz" ] && [ $fsz -gt 0 ] ; then
+			md5sum $tmp > $hsh
+			tar xf $tmp -C $dir_storage 2>/dev/null
+			# migrate to emmc if mounted
+			if [ -d "/media/storage_emmc" ]; then
+				logger -t "Storage" "Migrating MTD storage to eMMC backing store..."
+				bzip2 -9 $tmp 2>/dev/null
+				cp -f $tmp.bz2 "$emmc_storage_file" 2>/dev/null
+				rm -f $tmp.bz2
+				sync
+			fi
+		else
+			result=1
+			rm -f $hsh
+			logger -t "Storage load" "Invalid storage data in MTD partition: $mtd_part_dev"
+		fi
+		rm -f $tmp
 	fi
-	rm -f $tmp
 	rm -f $slk
 }
 
@@ -84,11 +103,31 @@ func_save()
 {
 	local fsz
 
-	# Check if /etc is on eMMC (not tmpfs)
-	if ! mount | grep "on /etc type tmpfs" >/dev/null; then
-		logger -t "Storage" "/etc is on persistent storage (eMMC). Syncing filesystem."
-		sync
-		return 0
+	if [ ! -d "/media/storage_emmc" ]; then
+		logger -t "Storage save" "eMMC backing store not found, falling back to MTD write."
+	else
+		logger -t "Storage save" "Saving to eMMC backing store..."
+		md5sum -c -s $hsh 2>/dev/null
+		if [ $? -eq 0 ] ; then
+			echo "Storage hash is not changed, skip save. Exit."
+			rm -f $tmp
+			return 0
+		fi
+		md5sum $tmp > $hsh
+		bzip2 -9 $tmp 2>/dev/null
+		cp -f "$tmp.bz2" "$emmc_storage_file" 2>/dev/null
+		if [ $? -eq 0 ]; then
+			rm -f "$tmp.bz2"
+			sync
+			echo "Done."
+			return 0
+		else
+			result=1
+			echo "Error! Failed to write to eMMC backing store."
+			logger -t "Storage save" "Error! Failed to write to eMMC backing store."
+			rm -f "$tmp.bz2"
+			return 1
+		fi
 	fi
 
 	logger -t "Storage save" "Save storage files to MTD partition \"$mtd_part_dev\""
@@ -172,7 +211,7 @@ func_restore()
 	rm -f $tbz
 	rm -rf $dir_storage
 	mkdir -p -m 755 $dir_storage
-	cp -rf $tmp_storage /etc
+	cp -rf $tmp_storage/* $dir_storage
 	rm -rf $tmp_storage
 
 	func_start_apps
@@ -186,6 +225,8 @@ func_erase()
 		rm -rf $dir_storage
 		mkdir -p -m 755 $dir_storage
 		touch "$slk"
+		# also erase emmc backing store
+		rm -f "$emmc_storage_file"
 	else
 		result=1
 	fi

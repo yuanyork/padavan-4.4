@@ -14,32 +14,7 @@ if [ "$1" == "-l" ] ; then
 fi
 
 mount -t tmpfs tmpfs /dev   -o size=8K
-
-# Try to mount /etc on eMMC, fallback to tmpfs
-emmc_etc_dev="/dev/mmcblk0p1"
-emmc_mounted=0
-
-if [ -b "$emmc_etc_dev" ]; then
-    # Try to mount
-    mount -t ext4 "$emmc_etc_dev" /etc -o noatime 2>/dev/null
-    
-    # If mount failed, try to format
-    if [ $? -ne 0 ]; then
-        logger -t "dev_init" "Mount failed, formatting $emmc_etc_dev to ext4..."
-        mkfs.ext4 -F "$emmc_etc_dev"
-        mount -t ext4 "$emmc_etc_dev" /etc -o noatime 2>/dev/null
-    fi
-    
-    if [ $? -eq 0 ]; then
-        emmc_mounted=1
-        logger -t "dev_init" "Mounted /etc on eMMC: $emmc_etc_dev"
-    fi
-fi
-
-if [ "$emmc_mounted" -eq 0 ]; then
-    mount -t tmpfs tmpfs /etc -o size=$size_etc,noatime
-    logger -t "dev_init" "Using tmpfs for /etc (eMMC not available)"
-fi
+mount -t tmpfs tmpfs /etc   -o size=$size_etc,noatime
 mount -t tmpfs tmpfs /home  -o size=1M
 mount -t tmpfs tmpfs /media -o size=8K
 mount -t tmpfs tmpfs /mnt   -o size=8K
@@ -80,6 +55,26 @@ mkdir -p -m 755 /etc/ssl
 mkdir -p -m 755 /etc/Wireless
 mkdir -p -m 750 /etc/Wireless/RT2860
 mkdir -p -m 750 /etc/Wireless/iNIC
+
+# mount emmc storage as backing store
+emmc_dev="/dev/mmcblk0p1"
+emmc_mnt="/media/storage_emmc"
+if [ -b "$emmc_dev" ]; then
+	logger -t "Storage" "eMMC partition $emmc_dev discovered."
+	# check if already formatted, otherwise format it
+	eval `/sbin/blkid -s "TYPE" -o udev $emmc_dev`
+	if [ "$ID_FS_TYPE" != "ext4" ]; then
+		logger -t "Storage" "Formatting $emmc_dev as ext4..."
+		/sbin/mkfs.ext4 -L "storage" "$emmc_dev"
+	fi
+	mkdir -p $emmc_mnt
+	mount -t ext4 $emmc_dev $emmc_mnt
+	if [ $? -eq 0 ]; then
+		logger -t "Storage" "eMMC storage mounted on $emmc_mnt."
+	else
+		logger -t "Storage" "Failed to mount eMMC storage backing store."
+	fi
+fi
 
 # extract storage files
 mtd_storage.sh load
