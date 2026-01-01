@@ -113,11 +113,12 @@ func_save()
 			rm -f $tmp
 			return 0
 		fi
+		rm -f $tbz
 		md5sum $tmp > $hsh
 		bzip2 -9 $tmp 2>/dev/null
-		cp -f "$tmp.bz2" "$emmc_storage_file" 2>/dev/null
+		cp -f $tbz "$emmc_storage_file" 2>/dev/null
 		if [ $? -eq 0 ]; then
-			rm -f "$tmp.bz2"
+			rm -f $tbz
 			sync
 			echo "Done."
 			return 0
@@ -125,7 +126,7 @@ func_save()
 			result=1
 			echo "Error! Failed to write to eMMC backing store."
 			logger -t "Storage save" "Error! Failed to write to eMMC backing store."
-			rm -f "$tmp.bz2"
+			rm -f $tbz
 			return 1
 		fi
 	fi

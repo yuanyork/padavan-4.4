@@ -22,7 +22,14 @@ logger -t "自动启动" "正在启动SmartDNS"
 fi
 
 
+
 logger -t "自动启动" "正在检查路由是否已连接互联网！"
+
+# Register Network Monitor Cron
+if [ -x /usr/bin/monitor_network.sh ]; then
+    /sbin/check_crontab.sh "*/1" "*" "*" "*" "*" "monitor_network.sh check"
+fi
+
 count=0
 while :
 do
