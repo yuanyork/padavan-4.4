@@ -23,9 +23,16 @@ fi
 
 
 
+logger -t "自动启动" "正在启动系统监控守护进程"
+
+# Start monitoring daemons (hardware watchdog + system health)
+if [ -x /usr/bin/start_monitors.sh ]; then
+    /usr/bin/start_monitors.sh &
+fi
+
 logger -t "自动启动" "正在检查路由是否已连接互联网！"
 
-# Register Network Monitor Cron
+# Register Network Monitor Cron (optional - can also run as daemon)
 if [ -x /usr/bin/monitor_network.sh ]; then
     /sbin/check_crontab.sh "*/1" "*" "*" "*" "*" "monitor_network.sh check"
 fi

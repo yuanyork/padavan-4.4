@@ -134,6 +134,11 @@ cmd_check() {
     wifi=$(get_wifi_stats)
     
     if [ $ret -eq 0 ]; then
+        # Reset failure counter on success
+        if [ -f "/tmp/net_monitor.fail_count" ]; then
+            rm -f "/tmp/net_monitor.fail_count"
+        fi
+
         if [ -f "/tmp/net_monitor.state" ]; then
             last_state=$(cat /tmp/net_monitor.state)
             if [ "$last_state" != "UP" ]; then
@@ -151,8 +156,32 @@ cmd_check() {
         # Run Deep Diagnostics
         diag_info=$(perform_diagnostics "$fail_type")
         
-        log_event "DOWN" "$fail_type" "$wifi" "$diag_info"
+        # Trigger Crash Monitor Snapshot
+        if [ -x "/usr/bin/monitor_crash.sh" ]; then
+             /usr/bin/monitor_crash.sh >/dev/null 2>&1 &
+        elif [ -x "$(dirname "$0")/monitor_crash.sh" ]; then
+             "$(dirname "$0")/monitor_crash.sh" >/dev/null 2>&1 &
+        fi
+        
+        # Auto-Recovery / Reboot Logic
+        FAIL_COUNT_FILE="/tmp/net_monitor.fail_count"
+        MAX_FAILURES=10
+        
+        count=0
+        if [ -f "$FAIL_COUNT_FILE" ]; then
+            count=$(cat "$FAIL_COUNT_FILE")
+        fi
+        count=$((count + 1))
+        echo "$count" > "$FAIL_COUNT_FILE"
+        
+        log_event "DOWN" "$fail_type" "$wifi" "$diag_info (Count: $count/$MAX_FAILURES)"
         echo "DOWN" > /tmp/net_monitor.state
+        
+        if [ "$count" -ge "$MAX_FAILURES" ]; then
+             log_event "CRITICAL" "REBOOT" "N/A" "Network down for $count checks. Rebooting now."
+             sleep 5
+             reboot
+        fi
     fi
 }
 
