@@ -32,8 +32,12 @@ get_wifi_stats() {
             # Try to get RSSI from iwpriv. This is driver dependent.
             # For MTK drivers in Padavan, 'get_mac_table' or 'show conn' might work.
             # Here we just try to see if the interface is up and log a placeholder or SSID
-            rssi=$(iwpriv $iface get_mac_table 2>/dev/null | awk '/[0-9A-F:]{17}/ {print $2}' | xargs | sed 's/ /,/g')
-            if [ -z "$rssi" ]; then
+            # CRITICAL FIX: Add timeout to prevent hang when driver freezes
+            rssi=$(timeout 3 iwpriv $iface get_mac_table 2>/dev/null | awk '/[0-9A-F:]{17}/ {print $2}' | xargs | sed 's/ /,/g')
+            if [ $? -eq 124 ]; then
+                # Command timed out - driver hung
+                rssi="TIMEOUT"
+            elif [ -z "$rssi" ]; then
                 # Fallback to /proc/net/wireless if available
                 rssi=$(awk -v iface="$iface" '$1 ~ iface {print $4}' /proc/net/wireless | sed 's/\.//')
             fi

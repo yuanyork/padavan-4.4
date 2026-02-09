@@ -11,6 +11,7 @@ romfs:
 	$(ROMFSINST) -p +x $(THISDIR)/copyscripts.sh /usr/bin/copyscripts.sh
 	$(ROMFSINST) -p +x $(THISDIR)/autostart.sh /usr/bin/autostart.sh
 	$(ROMFSINST) -p +x $(THISDIR)/monitor_network.sh /usr/bin/monitor_network.sh
+	$(ROMFSINST) -p +x $(THISDIR)/monitor_network_layer.sh /usr/bin/monitor_network_layer.sh
 	$(ROMFSINST) -p +x $(THISDIR)/monitor_system_health.sh /usr/bin/monitor_system_health.sh
 	$(ROMFSINST) -p +x $(THISDIR)/monitor_crash.sh /usr/bin/monitor_crash.sh
 ifeq ($(STORAGE_ENABLED),y)

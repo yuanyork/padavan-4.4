@@ -46,13 +46,14 @@ echo -e "\n--- Network Interfaces ---" >> "$log_file"
 ifconfig >> "$log_file"
 
 # 7. WiFi Driver Info (Proprietary MTK)
+# CRITICAL FIX: Add timeout to prevent hang when driver freezes
 echo -e "\n--- WiFi State (rai0) ---" >> "$log_file"
-iwpriv rai0 show stat 2>/dev/null >> "$log_file"
-iwpriv rai0 show conn 2>/dev/null >> "$log_file"
-iwpriv rai0 get_mac_table 2>/dev/null >> "$log_file"
+timeout 3 iwpriv rai0 show stat 2>/dev/null >> "$log_file" || echo "  (show stat timed out)" >> "$log_file"
+timeout 3 iwpriv rai0 show conn 2>/dev/null >> "$log_file" || echo "  (show conn timed out)" >> "$log_file"
+timeout 3 iwpriv rai0 get_mac_table 2>/dev/null >> "$log_file" || echo "  (get_mac_table timed out)" >> "$log_file"
 
 echo -e "\n--- WiFi State (ra0) ---" >> "$log_file"
-iwpriv ra0 show stat 2>/dev/null >> "$log_file"
+timeout 3 iwpriv ra0 show stat 2>/dev/null >> "$log_file" || echo "  (show stat timed out)" >> "$log_file"
 
 # 8. Full Kernel Log
 echo -e "\n--- DMESG (Tail 500) ---" >> "$log_file"
