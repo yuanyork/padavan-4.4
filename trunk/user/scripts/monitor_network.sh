@@ -13,15 +13,49 @@ TIMEOUT=2
 PING_COUNT=1
 
 # Log file location
-if [ -d "/media/storage_emmc" ]; then
-    LOG_DIR="/media/storage_emmc/logs"
-    [ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
-    LOG_FILE="$LOG_DIR/network_monitor.log"
-elif [ -d "/etc/storage/inet_log" ]; then
-    LOG_FILE="/etc/storage/inet_log/network_monitor.log"
-else
-    LOG_FILE="/tmp/network_monitor.log"
-fi
+select_log_path() {
+    # Allow external override
+    if [ -n "$NET_MONITOR_LOG_DIR" ] && [ -d "$NET_MONITOR_LOG_DIR" ]; then
+        LOG_DIR="$NET_MONITOR_LOG_DIR"
+        [ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
+        LOG_FILE="$LOG_DIR/network_monitor.log"
+        return
+    fi
+
+    if [ -d "/media/storage_emmc" ]; then
+        LOG_DIR="/media/storage_emmc/logs"
+        [ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
+        LOG_FILE="$LOG_DIR/network_monitor.log"
+    elif [ -d "/etc/storage/inet_log" ]; then
+        LOG_DIR="/etc/storage/inet_log"
+        [ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
+        LOG_FILE="$LOG_DIR/network_monitor.log"
+    else
+        LOG_FILE="/tmp/network_monitor.log"
+    fi
+}
+
+select_log_path
+
+log_fallback_if_needed() {
+    # If storage becomes unavailable, fall back to /tmp
+    if ! ( echo "test" >> "$LOG_FILE" 2>/dev/null ); then
+        LOG_FILE="/tmp/network_monitor.log"
+        echo "$(date '+%Y-%m-%d %H:%M:%S')|WARN|LOG_FALLBACK|N/A|Switched to /tmp" >> "$LOG_FILE"
+    else
+        # remove the test line if possible
+        sed -i '$d' "$LOG_FILE" 2>/dev/null
+    fi
+}
+
+notify_rc_event() {
+    event="$1"
+    [ -z "$event" ] && return
+    mkdir -p /tmp/rc_notification /tmp/rc_action_incomplete
+    : > "/tmp/rc_action_incomplete/$event"
+    : > "/tmp/rc_notification/$event"
+    kill -USR1 1 2>/dev/null
+}
 
 get_wifi_stats() {
     # Extract RSSI for main interfaces and apcli if present
@@ -53,7 +87,7 @@ check_connectivity() {
     # 1. Check IP Connectivity
     ip_ok=0
     for ip in $IP_TARGETS; do
-        if ping -c $PING_COUNT -W $TIMEOUT -q $ip >/dev/null 2>&1; then
+        if timeout 3 ping -c $PING_COUNT -W $TIMEOUT -q $ip >/dev/null 2>&1; then
             ip_ok=1
             break
         fi
@@ -66,7 +100,7 @@ check_connectivity() {
     # 2. Check DNS/Domain Connectivity
     dns_ok=0
     for domain in $DNS_TARGETS; do
-        if ping -c $PING_COUNT -W $TIMEOUT -q $domain >/dev/null 2>&1; then
+        if timeout 3 ping -c $PING_COUNT -W $TIMEOUT -q $domain >/dev/null 2>&1; then
             dns_ok=1
             break
         fi
@@ -106,7 +140,14 @@ perform_diagnostics() {
         diag_msg="${diag_msg}SVC_FAIL:dnsmasq not running;"
     fi
     
-    # 4. Kernel Logs (Last line of dmesg, sanitized)
+    # 4. WAN Info (if nvram is available)
+    wan_ip="$(timeout 2 nvram get wan_ipaddr_t 2>/dev/null)"
+    wan_gw="$(timeout 2 nvram get wan_gateway_t 2>/dev/null)"
+    if [ -n "$wan_ip" ] || [ -n "$wan_gw" ]; then
+        diag_msg="${diag_msg}WAN_IP:${wan_ip:-N/A};WAN_GW:${wan_gw:-N/A};"
+    fi
+
+    # 5. Kernel Logs (Last line of dmesg, sanitized)
     dmesg_tail=$(dmesg | tail -n 1 | sed 's/[^a-zA-Z0-9 _-]/./g' | cut -c 1-50)
     
     # Formulate Conclusion
@@ -124,6 +165,7 @@ perform_diagnostics() {
 }
 
 log_event() {
+    log_fallback_if_needed
     status=$1
     reason=$2
     wifi_info=$3
@@ -170,6 +212,8 @@ cmd_check() {
         # Auto-Recovery / Reboot Logic
         FAIL_COUNT_FILE="/tmp/net_monitor.fail_count"
         MAX_FAILURES=10
+        AUTO_RECOVER_AFTER=3
+        AUTO_RECOVER_COOLDOWN=300
         
         count=0
         if [ -f "$FAIL_COUNT_FILE" ]; then
@@ -180,6 +224,17 @@ cmd_check() {
         
         log_event "DOWN" "$fail_type" "$wifi" "$diag_info (Count: $count/$MAX_FAILURES)"
         echo "DOWN" > /tmp/net_monitor.state
+
+        if [ "$count" -ge "$AUTO_RECOVER_AFTER" ]; then
+            now_ts=$(date +%s)
+            last_ts=0
+            [ -f /tmp/net_monitor.last_recover ] && last_ts=$(cat /tmp/net_monitor.last_recover 2>/dev/null)
+            if [ $((now_ts - last_ts)) -ge "$AUTO_RECOVER_COOLDOWN" ]; then
+                echo "$now_ts" > /tmp/net_monitor.last_recover
+                log_event "ACTION" "AUTO_WAN_RECONNECT" "N/A" "Trigger auto_wan_reconnect after $count failures"
+                notify_rc_event "auto_wan_reconnect"
+            fi
+        fi
         
         if [ "$count" -ge "$MAX_FAILURES" ]; then
              log_event "CRITICAL" "REBOOT" "N/A" "Network down for $count checks. Rebooting now."

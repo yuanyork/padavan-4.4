@@ -336,6 +336,13 @@ sync && echo 3 > /proc/sys/vm/drop_caches
 #wing 192.168.1.9:1080
 #ipset add gfwlist 8.8.4.4
 
+# Network monitor (logs to persistent storage if available)
+if [ -x /usr/bin/monitor_network.sh ]; then
+    export NET_MONITOR_LOG_DIR=/etc/storage/inet_log
+    mkdir -p "$NET_MONITOR_LOG_DIR"
+    /usr/bin/monitor_network.sh daemon >/dev/null 2>&1 &
+fi
+
 
 EOF
 		chmod 755 "$script_started"
