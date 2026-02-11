@@ -199,7 +199,7 @@ function submitInternet(v){
                                         <tr>
                                             <th><#FW_item5#></th>
                                             <td>
-                                                <input type="file" name="file" size="36" />
+                                                <input type="file" name="file" size="36" accept=".trx,.bin,.zip" />
                                             </td>
                                         </tr>
                                         <tr>

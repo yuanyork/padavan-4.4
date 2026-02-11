@@ -51,8 +51,11 @@ check_header_bz2(const char *buf, long *file_len)
 	const unsigned char bz2h_1[3] = { 0x42, 0x5a, 0x68 };
 	const unsigned char bz2h_2[6] = { 0x31, 0x41, 0x59, 0x26, 0x53, 0x59 };
 
-	if (memcmp(buf, bz2h_1, 3) == 0 && memcmp(buf+4, bz2h_2, 6) == 0)
+	if (memcmp(buf, bz2h_1, 3) == 0 && memcmp(buf+4, bz2h_2, 6) == 0) {
+		if (file_len)
+			*file_len = -1;
 		return 0;
+	}
 
 	httpd_log("%s: Incorrect %s header!", "Storage restore", "BZ2");
 
@@ -107,6 +110,54 @@ check_header_image(const char *buf, long *file_len)
 	*file_len = (long)(ntohl(hdr->ih_size) + sizeof(image_header_t));
 
 	return 0;
+}
+
+static int
+is_zip_magic(const unsigned char *buf)
+{
+	const unsigned char zip1[4] = { 0x50, 0x4b, 0x03, 0x04 };
+	const unsigned char zip2[4] = { 0x50, 0x4b, 0x05, 0x06 };
+	const unsigned char zip3[4] = { 0x50, 0x4b, 0x07, 0x08 };
+
+	if (!buf)
+		return 0;
+
+	return (memcmp(buf, zip1, 4) == 0 ||
+		memcmp(buf, zip2, 4) == 0 ||
+		memcmp(buf, zip3, 4) == 0);
+}
+
+static int
+check_header_image_or_zip(const char *buf, long *file_len)
+{
+	if (is_zip_magic((const unsigned char *)buf)) {
+		if (file_len)
+			*file_len = -1;
+		return 0;
+	}
+
+	return check_header_image(buf, file_len);
+}
+
+static int
+is_zip_file(const char *path)
+{
+	int fd;
+	unsigned char buf[4];
+	int ret = 0;
+
+	if (!path)
+		return 0;
+
+	fd = open(path, O_RDONLY | O_BINARY);
+	if (fd < 0)
+		return 0;
+
+	if (read(fd, buf, sizeof(buf)) == (int)sizeof(buf))
+		ret = is_zip_magic(buf);
+
+	close(fd);
+	return ret;
 }
 
 static int
@@ -194,11 +245,12 @@ do_upload_file(FILE *stream, int clen, char *bndr, const char *fn, const char *o
 {
 	FILE *fp = NULL;
 	char buf[64+UPLOAD_BUF_SIZE+1], buf_obj[32], *ptr;
-	int cnt, count, offset, ret, ch, valid_header;
+	int cnt, count, offset, ret, ch, valid_header, use_boundary;
 	long filelen;
 
 	ret = EINVAL;
 	valid_header = 0;
+	use_boundary = 0;
 	snprintf(buf_obj, sizeof(buf_obj), "name=\"%s\"", obj_name);
 
 	/* Look for our part */
@@ -250,11 +302,16 @@ do_upload_file(FILE *stream, int clen, char *bndr, const char *fn, const char *o
 			if (func_hdr(ptr, &filelen) != 0)
 				goto err;
 			
+			if (filelen < 0) {
+				use_boundary = 1;
+				filelen = clen;
+			}
+			
 			valid_header = 1;
 		}
 		
 		/* check boundary marker (after \r\n or \n) */
-		if (bndr) {
+		if (use_boundary && bndr) {
 			char *pb = memmem(buf, 64 + count, bndr, strlen(bndr));
 			if (!pb)
 				pb = memmem(buf, 64 + count, bndr+1, strlen(bndr+1));
@@ -276,7 +333,7 @@ do_upload_file(FILE *stream, int clen, char *bndr, const char *fn, const char *o
 		filelen -= count;
 		fwrite(ptr, 1, count, fp);
 		
-		if (bndr && count >= 64)
+		if (use_boundary && bndr && count >= 64)
 			memcpy(buf, ptr + count - 64, 64);
 	}
 
@@ -317,7 +374,8 @@ err:
 void
 do_upgrade_fw_post(const char *url, FILE *stream, int clen, char *boundary)
 {
-	const char *upload_file = FW_IMG_NAME;
+	const char *upload_tmp = "/tmp/linux.upload";
+	char bndr[128];
 	int ret;
 
 	/* delete some files (need free space in /tmp) */
@@ -332,12 +390,40 @@ do_upgrade_fw_post(const char *url, FILE *stream, int clen, char *boundary)
 	/* reclaim RAM from caches */
 	fput_int("/proc/sys/vm/drop_caches", 1);
 
-	ret = do_upload_file(stream, clen, NULL, upload_file, "file", check_header_image, sizeof(image_header_t));
-	if (ret == 0) {
-		ret = check_crc_image(upload_file);
-		if (ret != 0)
-			unlink(upload_file);
+	if (boundary && *boundary)
+		snprintf(bndr, sizeof(bndr), "\r\n--%s", boundary);
+	else
+		bndr[0] = '\0';
+
+	unlink(FW_IMG_NAME);
+	unlink(upload_tmp);
+
+	ret = do_upload_file(stream, clen, (bndr[0] ? bndr : NULL), upload_tmp, "file",
+			     check_header_image_or_zip, sizeof(image_header_t));
+	if (ret != 0) {
+		unlink(upload_tmp);
+		return;
 	}
+
+	if (is_zip_file(upload_tmp)) {
+		unlink(FW_IMG_NAME);
+		ret = doSystem("unzip -p %s > %s", upload_tmp, FW_IMG_NAME);
+		unlink(upload_tmp);
+		if (ret != 0 || !f_exists(FW_IMG_NAME)) {
+			unlink(FW_IMG_NAME);
+			return;
+		}
+	} else {
+		if (rename(upload_tmp, FW_IMG_NAME) != 0) {
+			unlink(upload_tmp);
+			unlink(FW_IMG_NAME);
+			return;
+		}
+	}
+
+	ret = check_crc_image(FW_IMG_NAME);
+	if (ret != 0)
+		unlink(FW_IMG_NAME);
 }
 
 void
