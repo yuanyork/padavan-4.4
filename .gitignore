@@ -1,2 +1,13 @@
 .omc/
 .claude
+
+# AI assistant local metadata
+.codex
+.cursor/
+.aider*
+.windsurf/
+.roo/
+.gemini/
+.continue/
+.copilot/
+AGENTS.md

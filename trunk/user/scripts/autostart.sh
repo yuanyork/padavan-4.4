@@ -32,7 +32,8 @@ fi
 
 logger -t "自动启动" "正在检查路由是否已连接互联网！"
 
-# Register Network Monitor Cron (optional - can also run as daemon)
+# Register Network Monitor in cron only. Avoid running cron + daemon together,
+# otherwise duplicate recovery actions can race with each other.
 if [ -x /usr/bin/monitor_network.sh ]; then
     /sbin/check_crontab.sh "*/1" "*" "*" "*" "*" "monitor_network.sh check"
 fi

@@ -336,11 +336,11 @@ sync && echo 3 > /proc/sys/vm/drop_caches
 #wing 192.168.1.9:1080
 #ipset add gfwlist 8.8.4.4
 
-# Network monitor (logs to persistent storage if available)
+# Network monitor is started from cron in autostart.sh.
+# Keep only the persistent log directory setup here to avoid duplicate workers.
 if [ -x /usr/bin/monitor_network.sh ]; then
     export NET_MONITOR_LOG_DIR=/etc/storage/inet_log
     mkdir -p "$NET_MONITOR_LOG_DIR"
-    /usr/bin/monitor_network.sh daemon >/dev/null 2>&1 &
 fi
 
 
