@@ -1051,6 +1051,9 @@ struct nvram_pair router_defaults[] = {
 #if defined(USE_SFE)
 	{ "sfe_enable", "2" },
 #endif
+	{ "netmon_enable", "1" },
+	{ "netmon_recovery_enable", "0" },
+	{ "netmon_reboot_enable", "0" },
 	{ "fw_syn_cook", "0" },
 	{ "fw_mac_drop", "0" },
 	{ "nf_nat_type", "2" },

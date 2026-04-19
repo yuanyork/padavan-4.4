@@ -43,12 +43,9 @@ select_log_path
 
 log_fallback_if_needed() {
     # If storage becomes unavailable, fall back to /tmp
-    if ! ( echo "test" >> "$LOG_FILE" 2>/dev/null ); then
+    if ! touch "$LOG_FILE" 2>/dev/null; then
         LOG_FILE="/tmp/network_monitor.log"
         echo "$(date '+%Y-%m-%d %H:%M:%S')|WARN|LOG_FALLBACK|N/A|Switched to /tmp" >> "$LOG_FILE"
-    else
-        # remove the test line if possible
-        sed -i '$d' "$LOG_FILE" 2>/dev/null
     fi
 }
 
@@ -80,6 +77,37 @@ write_state_file() {
     file="$1"
     value="$2"
     echo "$value" > "$file"
+}
+
+acquire_monitor_lock() {
+    lock_dir="/tmp/net_monitor.lock"
+    pid_file="$lock_dir/pid"
+
+    if mkdir "$lock_dir" 2>/dev/null; then
+        echo "$$" > "$pid_file"
+        trap 'release_monitor_lock' EXIT INT TERM
+        return 0
+    fi
+
+    if [ -f "$pid_file" ]; then
+        lock_pid="$(cat "$pid_file" 2>/dev/null)"
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            return 1
+        fi
+    fi
+
+    rm -rf "$lock_dir" 2>/dev/null
+    if mkdir "$lock_dir" 2>/dev/null; then
+        echo "$$" > "$pid_file"
+        trap 'release_monitor_lock' EXIT INT TERM
+        return 0
+    fi
+
+    return 1
+}
+
+release_monitor_lock() {
+    rm -rf /tmp/net_monitor.lock 2>/dev/null
 }
 
 reset_recovery_state() {
@@ -120,6 +148,18 @@ advance_recovery() {
     AUTO_RECOVER_COOLDOWN=300
     REBOOT_AFTER=20
 
+    if ! nvram_enabled "netmon_recovery_enable" "1"; then
+        if [ "$count" -eq 1 ] || [ "$count" -eq 3 ] || [ "$count" -eq 6 ] || [ "$count" -eq "$REBOOT_AFTER" ]; then
+            log_event "INFO" "RECOVERY_DISABLED" "cause=RECOVERY_DISABLED" "skip auto recovery for $fail_type at count=$count,stage=$stage"
+        fi
+        return 0
+    fi
+
+    reboot_allowed=0
+    if nvram_enabled "netmon_reboot_enable" "0"; then
+        reboot_allowed=1
+    fi
+
     case "$fail_type" in
         DNS_FAIL)
             if [ "$stage" -lt 1 ] && [ "$count" -ge 2 ]; then
@@ -139,10 +179,15 @@ advance_recovery() {
                     write_state_file /tmp/net_monitor.recovery_stage 3
                 fi
             elif [ "$stage" -lt 4 ] && [ "$count" -ge "$REBOOT_AFTER" ]; then
-                log_event "CRITICAL" "REBOOT" "N/A" "DNS failures persisted for $count checks after staged recovery. Rebooting now."
-                write_state_file /tmp/net_monitor.recovery_stage 4
-                sleep 5
-                reboot
+                if [ "$reboot_allowed" = "1" ]; then
+                    log_event "CRITICAL" "REBOOT" "N/A" "DNS failures persisted for $count checks after staged recovery. Rebooting now."
+                    write_state_file /tmp/net_monitor.recovery_stage 4
+                    sleep 5
+                    reboot
+                else
+                    log_event "CRITICAL" "REBOOT_SKIPPED" "cause=REBOOT_DISABLED" "DNS failures persisted for $count checks after staged recovery, but reboot is disabled"
+                    write_state_file /tmp/net_monitor.recovery_stage 4
+                fi
             fi
             ;;
         IP_FAIL|GATEWAY_FAIL|ROUTE_FAIL)
@@ -155,10 +200,15 @@ advance_recovery() {
                     write_state_file /tmp/net_monitor.recovery_stage 2
                 fi
             elif [ "$stage" -lt 3 ] && [ "$count" -ge "$REBOOT_AFTER" ]; then
-                log_event "CRITICAL" "REBOOT" "N/A" "WAN failures persisted for $count checks after staged recovery. Rebooting now."
-                write_state_file /tmp/net_monitor.recovery_stage 3
-                sleep 5
-                reboot
+                if [ "$reboot_allowed" = "1" ]; then
+                    log_event "CRITICAL" "REBOOT" "N/A" "WAN failures persisted for $count checks after staged recovery. Rebooting now."
+                    write_state_file /tmp/net_monitor.recovery_stage 3
+                    sleep 5
+                    reboot
+                else
+                    log_event "CRITICAL" "REBOOT_SKIPPED" "cause=REBOOT_DISABLED" "WAN failures persisted for $count checks after staged recovery, but reboot is disabled"
+                    write_state_file /tmp/net_monitor.recovery_stage 3
+                fi
             fi
             ;;
     esac
@@ -168,6 +218,43 @@ safe_nvram_get() {
     key="$1"
     value="$(timeout 2 nvram get "$key" 2>/dev/null)"
     echo "${value:-N/A}"
+}
+
+nvram_enabled() {
+    key="$1"
+    default_value="$2"
+    value="$(safe_nvram_get "$key")"
+
+    case "$value" in
+        1|on|ON|true|TRUE|yes|YES)
+            return 0
+            ;;
+        0|off|OFF|false|FALSE|no|NO)
+            return 1
+            ;;
+        N/A|"")
+            [ "$default_value" = "1" ]
+            return
+            ;;
+    esac
+
+    [ "$default_value" = "1" ]
+}
+
+first_valid_value() {
+    for value in "$@"; do
+        case "$value" in
+            ""|"N/A"|"0.0.0.0")
+                ;;
+            *)
+                echo "$value"
+                return 0
+                ;;
+        esac
+    done
+
+    last_value="$1"
+    [ -n "$last_value" ] && echo "$last_value" || echo "N/A"
 }
 
 get_interface_state() {
@@ -344,10 +431,11 @@ collect_failure_context() {
     fail_type="$1"
     route_if="$(netmon_route_if)"
     gateway="$(netmon_gateway)"
-    wan_proto="$(safe_nvram_get wan_proto)"
-    wan_ip="$(safe_nvram_get wan_ipaddr_t)"
-    wan_gw="$(safe_nvram_get wan_gateway_t)"
-    wan_dns="$(safe_nvram_get wanx_dns)"
+    route_ip="$(ip -4 addr show dev "$route_if" 2>/dev/null | awk '/inet / {print $2; exit}' | cut -d/ -f1)"
+    wan_proto="$(first_valid_value "$(safe_nvram_get wan0_proto)" "$(safe_nvram_get wan_proto)")"
+    wan_ip="$(first_valid_value "$route_ip" "$(safe_nvram_get wan0_ipaddr)" "$(safe_nvram_get wan_ipaddr)" "$(safe_nvram_get wan_ipaddr_t)")"
+    wan_gw="$(first_valid_value "$gateway" "$(safe_nvram_get wan0_gateway)" "$(safe_nvram_get wan_gateway)" "$(safe_nvram_get wan_gateway_t)")"
+    wan_dns="$(first_valid_value "$(safe_nvram_get wanx_dns)" "$(safe_nvram_get wan0_dns)")"
     mem_free="$(awk '/MemFree/ {print $2}' /proc/meminfo 2>/dev/null)"
     route_line="$(ip route show default 2>/dev/null | head -n 1 | sed 's/[[:space:]]\\+/ /g')"
     iface_state="$(get_interface_state "$route_if")"
@@ -396,6 +484,14 @@ log_event() {
 }
 
 cmd_check() {
+    if ! nvram_enabled "netmon_enable" "1"; then
+        exit 0
+    fi
+
+    if ! acquire_monitor_lock; then
+        exit 0
+    fi
+
     check_wifi_events
     check_connectivity
     ret=$?
