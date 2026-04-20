@@ -79,6 +79,25 @@ write_state_file() {
     echo "$value" > "$file"
 }
 
+update_warning_state() {
+    warning_code="$1"
+    warning_details="$2"
+    warn_file="/tmp/net_monitor.warn_state"
+    previous_warning="$(read_state_file "$warn_file" "")"
+
+    if [ -n "$warning_code" ]; then
+        if [ "$warning_code" != "$previous_warning" ]; then
+            log_event "WARN" "$warning_code" "cause=$warning_code" "$warning_details"
+            write_state_file "$warn_file" "$warning_code"
+        fi
+    else
+        if [ -n "$previous_warning" ]; then
+            log_event "INFO" "WARN_RECOVERY" "cause=WARN_RECOVERED" "warning $previous_warning cleared"
+            rm -f "$warn_file"
+        fi
+    fi
+}
+
 acquire_monitor_lock() {
     lock_dir="/tmp/net_monitor.lock"
     pid_file="$lock_dir/pid"
@@ -216,7 +235,7 @@ advance_recovery() {
 
 safe_nvram_get() {
     key="$1"
-    value="$(timeout 2 nvram get "$key" 2>/dev/null)"
+    value="$(netmon_run_timeout 2 nvram get "$key" 2>/dev/null)"
     echo "${value:-N/A}"
 }
 
@@ -295,7 +314,7 @@ get_wifi_band_snapshot() {
             [ -r "/sys/class/net/$iface/operstate" ] && operstate="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)"
             [ -r "/sys/class/net/$iface/carrier" ] && carrier="$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)"
 
-            timeout 3 iwpriv "$iface" show stat >/dev/null 2>&1
+            netmon_run_timeout 3 iwpriv "$iface" show stat >/dev/null 2>&1
             iwpriv_rc="$?"
 
             if [ "$iwpriv_rc" = "124" ]; then
@@ -327,8 +346,8 @@ capture_wifi_debug_snapshot() {
     radio_cfg="$(safe_nvram_get "$radio_key")"
     ssid="$(safe_nvram_get "$ssid_key")"
     ifconfig_line="$(ip link show "$iface" 2>/dev/null | head -n 1 | sanitize_inline)"
-    iwpriv_stat="$(timeout 3 iwpriv "$iface" show stat 2>/dev/null | head -n 8 | sanitize_inline)"
-    iwpriv_conn="$(timeout 3 iwpriv "$iface" show conn 2>/dev/null | head -n 8 | sanitize_inline)"
+    iwpriv_stat="$(netmon_run_timeout 3 iwpriv "$iface" show stat 2>/dev/null | head -n 8 | sanitize_inline)"
+    iwpriv_conn="$(netmon_run_timeout 3 iwpriv "$iface" show conn 2>/dev/null | head -n 8 | sanitize_inline)"
 
     [ -n "$ifconfig_line" ] || ifconfig_line="N/A"
     [ -n "$iwpriv_stat" ] || iwpriv_stat="N/A"
@@ -450,6 +469,8 @@ collect_failure_context() {
 
 check_connectivity() {
     # Returns: 0=OK, 1=IP_FAIL, 2=DNS_FAIL, 3=GATEWAY_FAIL, 4=ROUTE_FAIL
+    NETMON_WARNING_CODE=""
+    NETMON_WARNING_DETAILS=""
 
     route_if="$(netmon_route_if)"
     if [ -z "$route_if" ]; then
@@ -457,12 +478,19 @@ check_connectivity() {
     fi
 
     gateway="$(netmon_gateway)"
-    if [ -n "$gateway" ] && ! netmon_ping_any "$gateway"; then
-        return 3
+    gateway_unreachable=0
+    if [ -n "$gateway" ] && ! netmon_ping_retry "$gateway" 2; then
+        gateway_unreachable=1
     fi
 
     if ! netmon_ping_any $IP_TARGETS; then
+        [ "$gateway_unreachable" = "1" ] && return 3
         return 1
+    fi
+
+    if [ "$gateway_unreachable" = "1" ]; then
+        NETMON_WARNING_CODE="GATEWAY_PING_UNSTABLE"
+        NETMON_WARNING_DETAILS="cause=GATEWAY_PING_FAILED_BUT_UPSTREAM_OK,if=${route_if:-N/A},gw=${gateway:-N/A},ip_targets=$IP_TARGETS"
     fi
 
     if ! netmon_dns_any $DNS_TARGETS; then
@@ -497,6 +525,7 @@ cmd_check() {
     ret=$?
     
     if [ $ret -eq 0 ]; then
+        update_warning_state "$NETMON_WARNING_CODE" "$NETMON_WARNING_DETAILS"
         # Reset failure counter on success
         reset_recovery_state
 
@@ -508,6 +537,7 @@ cmd_check() {
         fi
         echo "UP" > /tmp/net_monitor.state
     else
+        update_warning_state "" ""
         case $ret in
             1) fail_type="IP_FAIL" ;;
             2) fail_type="DNS_FAIL" ;;
